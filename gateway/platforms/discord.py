@@ -2408,26 +2408,38 @@ Rules:
 
 
 
-        @slash_sup.autocomplete("name")
-        async def _sup_name_ac(interaction: discord.Interaction, current: str):
+        # Cache supplement names in memory for instant autocomplete
+        _sup_name_cache = []
+
+        async def _load_sup_cache():
             import json as _json, urllib.request as _req, urllib.parse as _parse
-            if not current or len(current) < 2:
-                return []
             try:
                 _SU = os.environ.get("SUPABASE_URL", "")
                 _SK = os.environ.get("SUPABASE_SERVICE_KEY", "")
                 if not _SU or not _SK:
-                    return []
+                    return
                 _h = {"apikey": _SK, "Authorization": f"Bearer {_SK}"}
-                _term = current.lower()
-                _params = _parse.urlencode({"name": f"ilike.*{_term}*", "select": "name", "limit": "15"})
+                _params = _parse.urlencode({"select": "name,aliases", "limit": "500"})
                 _rq = _req.Request(f"{_SU}/rest/v1/supplement_database?{_params}", headers=_h)
-                with _req.urlopen(_rq, timeout=3) as _resp:
+                with _req.urlopen(_rq, timeout=10) as _resp:
                     results = _json.loads(_resp.read().decode())
-                return [discord.app_commands.Choice(name=r["name"][:100], value=r["name"][:100]) for r in results]
+                _sup_name_cache.clear()
+                for r in results:
+                    _sup_name_cache.append(r["name"])
+                logger.info("[sups-builder] Cached %d supplement names", len(_sup_name_cache))
             except Exception as _e:
-                logger.debug("[sups-builder] autocomplete error: %s", _e)
+                logger.error("[sups-builder] Failed to cache supplements: %s", _e)
+
+        # Load cache on startup
+        asyncio.get_event_loop().call_soon(lambda: asyncio.ensure_future(_load_sup_cache()))
+
+        @slash_sup.autocomplete(name)
+        async def _sup_name_ac(interaction: discord.Interaction, current: str):
+            if not current or len(current) < 2:
                 return []
+            _term = current.lower()
+            matches = [n for n in _sup_name_cache if _term in n.lower()]
+            return [discord.app_commands.Choice(name=m[:100], value=m[:100]) for m in matches[:15]]
 
         @slash_sup.autocomplete("unit")
         async def _sup_unit_ac(interaction: discord.Interaction, current: str):
