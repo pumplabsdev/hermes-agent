@@ -2480,15 +2480,17 @@ Rules:
         @discord.app_commands.describe(name="Name for this stack (e.g. TRT Protocol, Morning Stack)")
         async def slash_end_sups(interaction: discord.Interaction, name: str = "My Stack"):
             import json as _json, hashlib as _hl, urllib.request as _req
-            if not isinstance(interaction.channel, discord.DMChannel):
+            # Defer IMMEDIATELY to avoid 3-second timeout
+            is_dm = isinstance(interaction.channel, discord.DMChannel)
+            if not is_dm:
                 await interaction.response.send_message("This command only works in DMs. Message me directly to build a stack.", ephemeral=True)
                 return
+            await interaction.response.defer()
             uid = str(interaction.user.id)
             session = _sups_sessions.get(uid)
             if not session or not session.get("started") or not session.get("items"):
-                await interaction.response.send_message("No active stack or no supplements added. Run `/start-sups` then `/sup` first.", ephemeral=True)
+                await interaction.followup.send("No active stack or no supplements added. Run `/start-sups` then `/sup` first.")
                 return
-            await interaction.response.defer()
             items = session["items"]
             _SUPA_URL = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co") or "https://itdtludfrlwjmjxtpvwl.supabase.co"
             _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
