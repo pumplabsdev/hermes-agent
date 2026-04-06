@@ -2383,7 +2383,12 @@ Rules:
                         canonical = _norm[0]["canonical_name"]
                 except Exception:
                     pass
-            _s = schedule.lower().strip().replace(" / ", "/").replace(" /", "/").replace("/ ", "/")
+            _s = schedule.lower().strip().replace(" / ", "/").replace(" /", "/").replace("/ ", "/").replace(", ", "/")
+            _day_names = {"mon","tue","wed","thu","fri","sat","sun","monday","tuesday","wednesday","thursday","friday","saturday","sunday"}
+            # If input contains space-separated day names, convert spaces to slashes
+            _parts = _s.split()
+            if len(_parts) > 1 and all(p in _day_names for p in _parts):
+                _s = "/".join(_parts)
             _presets = {"ed": ("ed", ["sun","mon","tue","wed","thu","fri","sat"]), "daily": ("ed", ["sun","mon","tue","wed","thu","fri","sat"]),
                 "eod": ("eod", []), "mwf": ("custom", ["mon","wed","fri"]), "mon/thu": ("custom", ["mon","thu"]),
                 "mon/wed/fri": ("custom", ["mon","wed","fri"]), "tue/thu": ("custom", ["tue","thu"]),
