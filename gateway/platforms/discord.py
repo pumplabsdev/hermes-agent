@@ -542,11 +542,36 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 # Sync slash commands with Discord
                 try:
-                    synced = await adapter_self._client.tree.sync()
-                    logger.info("[%s] Synced %d slash command(s)", adapter_self.name, len(synced))
+                    # Sync globally first (enables DM commands)
+                    try:
+                        global_synced = await adapter_self._client.tree.sync()
+                        logger.info("[%s] Synced %d global slash command(s)", adapter_self.name, len(global_synced))
+                    except Exception as ge:
+                        logger.warning("[%s] Global slash command sync failed: %s", adapter_self.name, ge)
+                    # Then sync to each guild for instant availability
+                    for guild in adapter_self._client.guilds:
+                        try:
+                            adapter_self._client.tree.copy_global_to(guild=guild)
+                            guild_synced = await adapter_self._client.tree.sync(guild=guild)
+                            logger.info("[%s] Synced %d slash command(s) to guild %s", adapter_self.name, len(guild_synced), guild.name)
+                        except Exception as ge:
+                            logger.warning("[%s] Guild sync failed for %s: %s", adapter_self.name, guild.name, ge)
                 except Exception as e:  # pragma: no cover - defensive logging
                     logger.warning("[%s] Slash command sync failed: %s", adapter_self.name, e, exc_info=True)
                 adapter_self._ready_event.set()
+
+                # Send startup message to status channel
+                _status_ch_id = os.getenv("DISCORD_STATUS_CHANNEL")
+                if _status_ch_id:
+                    try:
+                        from datetime import datetime
+                        _ch = adapter_self._client.get_channel(int(_status_ch_id))
+                        if not _ch:
+                            _ch = await adapter_self._client.fetch_channel(int(_status_ch_id))
+                        if _ch:
+                            await _ch.send(f"Health Bot online — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+                    except Exception as _e:
+                        logger.warning("Failed to send startup status: %s", _e)
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -647,7 +672,7 @@ class DiscordAdapter(BasePlatformAdapter):
             self._bot_task = asyncio.create_task(self._client.start(self.config.token))
 
             # Wait for ready
-            await asyncio.wait_for(self._ready_event.wait(), timeout=30)
+            await asyncio.wait_for(self._ready_event.wait(), timeout=120)
 
             self._running = True
             return True
@@ -675,6 +700,16 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
+        # Send shutdown message to status channel
+        _status_ch_id = os.getenv("DISCORD_STATUS_CHANNEL")
+        if _status_ch_id and self._client and not self._client.is_closed():
+            try:
+                from datetime import datetime
+                _ch = self._client.get_channel(int(_status_ch_id))
+                if _ch:
+                    await _ch.send(f"Health Bot going offline — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            except Exception:
+                pass
         # Clean up all active voice connections before closing the client
         for guild_id in list(self._voice_clients.keys()):
             try:
@@ -768,6 +803,38 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Format and split message if needed
             formatted = self.format_message(content)
+
+            # If response exceeds line threshold, send as file attachment
+            _file_line_threshold = int(os.getenv("DISCORD_FILE_LINE_THRESHOLD", "0"))
+            if _file_line_threshold > 0 and formatted.count("\n") >= _file_line_threshold:
+                import tempfile
+                import textwrap
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".md", prefix="response_", delete=False) as tmp:
+                    wrapped = "\n".join(
+                        "\n".join(textwrap.wrap(line, width=60, break_long_words=False, break_on_hyphens=False)) if line.strip() else line
+                        for line in formatted.split("\n")
+                    )
+                    tmp.write(wrapped)
+                    tmp_path = tmp.name
+                try:
+                    preview = "\n".join(formatted.split("\n")[:3])
+                    if len(preview) > 200:
+                        preview = preview[:200] + "..."
+                    ref = None
+                    if reply_to:
+                        try:
+                            ref = await channel.fetch_message(int(reply_to))
+                        except Exception:
+                            pass
+                    msg = await channel.send(
+                        content=preview,
+                        file=discord.File(tmp_path, filename="response.md"),
+                        reference=ref,
+                    )
+                    return SendResult(success=True, message_id=str(msg.id))
+                finally:
+                    os.unlink(tmp_path)
+
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
 
             message_ids = []
@@ -1679,6 +1746,739 @@ class DiscordAdapter(BasePlatformAdapter):
         ):
             await interaction.response.defer(ephemeral=True)
             await self._handle_thread_create_slash(interaction, name, message, auto_archive_duration)
+
+
+        @tree.command(name="file", description="Show a file from the server")
+        @discord.app_commands.describe(path="File path on the server (e.g. ~/pump-labs-vault/TODO.md)")
+        async def slash_file(interaction: discord.Interaction, path: str):
+            import os
+            await interaction.response.defer()
+            expanded = os.path.expanduser(path)
+            if not os.path.isfile(expanded):
+                await interaction.followup.send(f"File not found: {path}")
+                return
+            try:
+                size = os.path.getsize(expanded)
+                if size > 1_900:
+                    # Send as attachment if too large for a message
+                    await interaction.followup.send(file=discord.File(expanded))
+                else:
+                    with open(expanded, "r") as f:
+                        text = f.read()
+                    ext = os.path.splitext(expanded)[1].lstrip(".") or "txt"
+                    lang = {"py": "python", "js": "javascript", "ts": "typescript", "sh": "bash", "yml": "yaml", "md": "markdown"}.get(ext, ext)
+                    triple = chr(96)*3
+                    await interaction.followup.send(f"**{os.path.basename(expanded)}**\n{triple}{lang}\n{text}\n{triple}")
+            except Exception as e:
+                await interaction.followup.send(f"Error reading file: {e}")
+
+
+        @tree.command(name="ingest", description="Ingest a URL into the knowledge vault")
+        @discord.app_commands.describe(
+            url="URL to article, paper, or resource",
+            category="Vault category (e.g. hormones, conditions, materia-medica, ray-peat, patterns, research)"
+        )
+        async def slash_ingest(interaction: discord.Interaction, url: str, category: str = "research"):
+            import os, re, subprocess, json, sys
+            await interaction.response.defer()
+            vault = os.path.expanduser(os.getenv("OBSIDIAN_VAULT_PATH", "~/east-west-synthesis"))
+            helper = os.path.expanduser("~/.hermes/profiles/healthbot/ingest_helper.py")
+            valid_categories = ["hormones", "conditions", "materia-medica", "ray-peat", "patterns", "research", "atlas", "mappings", "references"]
+            if category not in valid_categories:
+                sep = ", "
+                await interaction.followup.send(f"Invalid category. Choose from: {sep.join(valid_categories)}")
+                return
+            try:
+                fetch_result = subprocess.run(
+                    [sys.executable, helper, "fetch", url],
+                    capture_output=True, text=True, timeout=30
+                )
+                if fetch_result.returncode != 0:
+                    await interaction.followup.send(f"Failed to fetch URL: {fetch_result.stderr[:300]}")
+                    return
+                fetched = json.loads(fetch_result.stdout)
+                title = fetched["title"]
+                body = fetched["body"]
+
+                api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                if not api_key:
+                    await interaction.followup.send("No ANTHROPIC_API_KEY configured")
+                    return
+
+                prompt = f"Extract the key health/science information from this article and create an Obsidian-compatible markdown note.\n\nTitle: {title}\nURL: {url}\nContent: {body[:6000]}\n\nCreate a structured note with:\n1. YAML frontmatter (title, date, source, url, tags)\n2. Summary (2-3 sentences)\n3. Key findings or claims\n4. Mechanisms discussed\n5. Relevant compounds, hormones, or nutrients mentioned\n6. Cross-references to related concepts using [[wikilinks]]\n\nKeep it concise and factual."
+
+                llm_result = subprocess.run(
+                    [sys.executable, helper, "llm"],
+                    input=prompt,
+                    capture_output=True, text=True, timeout=90,
+                    env={**os.environ, "ANTHROPIC_API_KEY": api_key}
+                )
+                if llm_result.returncode != 0:
+                    await interaction.followup.send(f"LLM processing failed: {llm_result.stderr[:300]}")
+                    return
+
+                note_content = llm_result.stdout.strip()
+                slug = re.sub(r'[^a-z0-9]+', '-', title.lower().strip())[:60].strip('-')
+                filename = f"{slug}.md"
+                filepath = os.path.join(vault, category, filename)
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
+                import textwrap as _tw
+                wrapped_note = "\n".join(
+                    "\n".join(_tw.wrap(line, width=60, break_long_words=False, break_on_hyphens=False)) if line.strip() else line
+                    for line in note_content.split("\n")
+                )
+                with open(filepath, "w") as f:
+                    f.write(note_content)
+
+                import tempfile as _tf
+                with _tf.NamedTemporaryFile(mode="w", suffix=".md", prefix="ingested_", delete=False) as tmp:
+                    tmp.write(wrapped_note)
+                    tmp_path = tmp.name
+                try:
+                    await interaction.followup.send(
+                        f"Ingested into vault: `{category}/{filename}`",
+                        file=discord.File(tmp_path, filename=filename),
+                    )
+                finally:
+                    os.unlink(tmp_path)
+            except Exception as e:
+                await interaction.followup.send(f"Ingest failed: {str(e)[:300]}")
+
+        # ── /tokens — per-user token usage tracking ──
+        @tree.command(name="tokens", description="Check your token usage this month")
+        @discord.app_commands.describe(target="Admin only: @user, 'top', or 'cost'")
+        async def slash_tokens(interaction: discord.Interaction, target: str = ""):
+            import sqlite3 as _sql
+            from datetime import datetime as _dt, timedelta as _td
+            from pathlib import Path as _P
+
+            _DB = _P(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))) / "token_usage.db"
+            _ADMINS = set(os.environ.get("TOKEN_ADMIN_USERS", "").split(","))
+            _LIMITS = {"Admin": 0, "Mod": 0, "Premium": 500_000, "Basic Access": 100_000}
+            _DEFAULT = 50_000
+            _IN_COST, _OUT_COST = 3.0, 15.0
+
+            def _mo(): return _dt.utcnow().strftime("%Y-%m")
+            def _rst():
+                n = _dt.utcnow()
+                return int((n.replace(day=28) + _td(days=4)).replace(day=1, hour=0, minute=0, second=0).timestamp())
+            def _bar(p):
+                f = int(min(p, 100) / 10)
+                return "\u2588" * f + "\u2591" * (10 - f)
+
+            uid = str(interaction.user.id)
+            is_admin = uid in _ADMINS
+
+            if not _DB.exists():
+                await interaction.response.send_message("No usage data yet.", ephemeral=True)
+                return
+
+            db = _sql.connect(str(_DB))
+
+            if not target or (not is_admin and target in ("top", "cost")):
+                row = db.execute("SELECT input_tokens, output_tokens FROM token_usage WHERE user_id=? AND month=?", (uid, _mo())).fetchone()
+                inp, out = (row[0], row[1]) if row else (0, 0)
+                total = inp + out
+                _limit = 0 if is_admin else _DEFAULT
+                if _limit == 0:
+                    msg = f"**Token Usage \u2014 {_mo()}**\n**{total:,}** tokens used\nTier: **Unlimited**"
+                else:
+                    pct = min(total / _limit * 100, 100)
+                    msg = f"**Token Usage \u2014 {_mo()}**\n`[{_bar(pct)}]` {pct:.0f}%\n**{total:,}** / {_limit:,} tokens\nResets <t:{_rst()}:R>"
+                if target and not is_admin:
+                    msg += "\n\n*Admin access required.*"
+
+            elif target == "top" and is_admin:
+                rows = db.execute("SELECT user_id, input_tokens + output_tokens as t FROM token_usage WHERE month=? ORDER BY t DESC LIMIT 10", (_mo(),)).fetchall()
+                if not rows:
+                    msg = "No usage this month."
+                else:
+                    lines = [f"**Top Users \u2014 {_mo()}**"]
+                    for i, (u, t) in enumerate(rows, 1):
+                        lines.append(f"{i}. <@{u}> \u2014 **{t:,}** tokens")
+                    msg = "\n".join(lines)
+
+            elif target == "cost" and is_admin:
+                row = db.execute("SELECT SUM(input_tokens), SUM(output_tokens), COUNT(DISTINCT user_id) FROM token_usage WHERE month=?", (_mo(),)).fetchone()
+                inp, out, uc = (row[0] or 0, row[1] or 0, row[2] or 0)
+                cost = (inp / 1e6 * _IN_COST) + (out / 1e6 * _OUT_COST)
+                msg = (f"**API Cost \u2014 {_mo()}**\n"
+                       f"Input: **{inp:,}** (${inp/1e6*_IN_COST:.2f})\n"
+                       f"Output: **{out:,}** (${out/1e6*_OUT_COST:.2f})\n"
+                       f"**Total: ${cost:.2f}** \u2014 {uc} users\n"
+                       f"Resets <t:{_rst()}:R>")
+
+            elif target.startswith("<@") and is_admin:
+                tid = target.replace("<@", "").replace(">", "").replace("!", "")
+                row = db.execute("SELECT input_tokens, output_tokens FROM token_usage WHERE user_id=? AND month=?", (tid, _mo())).fetchone()
+                inp, out = (row[0], row[1]) if row else (0, 0)
+                total = inp + out
+                pct = min(total / _DEFAULT * 100, 100) if _DEFAULT > 0 else 0
+                msg = (f"**Token Usage for <@{tid}> \u2014 {_mo()}**\n"
+                       f"`[{_bar(pct)}]` {pct:.0f}%\n"
+                       f"**{total:,}** / {_DEFAULT:,} tokens")
+            else:
+                msg = _format_user_usage(uid) if not target else "Unknown command. Try: `/tokens`, `/tokens top`, `/tokens cost`, `/tokens @user`"
+
+            db.close()
+            await interaction.response.send_message(msg, ephemeral=True)
+
+
+        # ── /suggest — generate supplement protocol from vault knowledge ──
+        @tree.command(name="suggest", description="Get a supplement regimen suggestion from the knowledge base")
+        @discord.app_commands.describe(topic="What you want the regimen for (e.g. knee pain, thyroid, sleep)")
+        async def slash_suggest(interaction: discord.Interaction, topic: str):
+            import json as _json
+            import subprocess as _sp
+            import hashlib as _hl
+            from pathlib import Path as _Path
+
+            await interaction.response.defer(ephemeral=False)
+
+            _VAULT = _Path("/knowledge-base")
+            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            _API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+            if not _SUPA_URL or not _SUPA_KEY or not _API_KEY:
+                await interaction.followup.send("Missing configuration. Contact an admin.")
+                return
+
+            # Gather vault context — search for relevant files
+            _relevant = []
+            _search_dirs = ["conditions", "materia-medica", "hormones", "patterns", "mappings", "atlas"]
+            _topic_lower = topic.lower()
+            for _sd in _search_dirs:
+                _dir = _VAULT / _sd
+                if not _dir.exists():
+                    continue
+                for _f in _dir.rglob("*.md"):
+                    _content = _f.read_text(encoding="utf-8", errors="ignore")
+                    if _topic_lower in _content.lower() or _topic_lower in _f.stem.lower():
+                        _relevant.append(f"## {_f.stem}\n{_content[:1500]}")
+                        if len(_relevant) >= 8:
+                            break
+
+            _vault_context = "\n\n".join(_relevant) if _relevant else "No specific vault entries found for this topic."
+
+            # Call Claude to build protocol
+            import urllib.request as _req
+            _body = _json.dumps({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 2000,
+                "messages": [{"role": "user", "content": f"""You are a supplement protocol designer with access to a curated health knowledge base.
+
+Based on the following vault research, create a supplement regimen for: {topic}
+
+VAULT CONTEXT:
+{_vault_context}
+
+Return ONLY valid JSON in this exact format (no markdown, no explanation before or after):
+{{
+  "version": 1,
+  "name": "<Protocol Name>",
+  "source": "healthbot",
+  "reasoning": "<2-3 sentences explaining why these supplements were chosen>",
+  "groups": [
+    {{
+      "name": "<Group Name (e.g. Morning Stack)>",
+      "schedule_type": "ed",
+      "schedule_days": ["sun","mon","tue","wed","thu","fri","sat"],
+      "time_of_day": ["morning"],
+      "color": "#00d4aa",
+      "medications": [
+        {{"name": "Supplement Name", "dose": "100", "unit": "mg"}}
+      ]
+    }}
+  ]
+}}
+
+Rules:
+- Use evidence from the vault context when available
+- Include 3-8 supplements total across groups
+- Group by time of day (morning/evening) or purpose
+- Use standard doses from established research
+- Include the reasoning field explaining your choices"""}]
+            }).encode()
+
+            _headers = {
+                "Content-Type": "application/json",
+                "x-api-key": _API_KEY,
+                "anthropic-version": "2023-06-01"
+            }
+
+            try:
+                _rq = _req.Request("https://api.anthropic.com/v1/messages", data=_body, headers=_headers, method="POST")
+                with _req.urlopen(_rq, timeout=30) as _resp:
+                    _result = _json.loads(_resp.read().decode())
+                _text = _result["content"][0]["text"]
+            except Exception as _e:
+                await interaction.followup.send(f"Failed to generate protocol: {_e}")
+                return
+
+            # Parse JSON from response
+            try:
+                _start = _text.index("{")
+                _end = _text.rindex("}") + 1
+                _proto = _json.loads(_text[_start:_end])
+            except (ValueError, _json.JSONDecodeError) as _e:
+                await interaction.followup.send(f"Failed to parse protocol. Try again or rephrase your request.")
+                return
+
+            # Generate code
+            _code = f"pl-{_hl.md5(topic.encode()).hexdigest()[:6]}-{int(__import__('time').time()) % 10000}"
+
+            # Save to pending_protocols
+            try:
+                _save_body = _json.dumps({
+                    "code": _code,
+                    "protocol": _proto,
+                    "created_by_discord_id": str(interaction.user.id)
+                }).encode()
+                _save_headers = {
+                    "Content-Type": "application/json",
+                    "apikey": _SUPA_KEY,
+                    "Authorization": f"Bearer {_SUPA_KEY}",
+                    "Prefer": "return=minimal"
+                }
+                _save_rq = _req.Request(f"{_SUPA_URL}/rest/v1/pending_protocols", data=_save_body, headers=_save_headers, method="POST")
+                _req.urlopen(_save_rq, timeout=10)
+            except Exception as _e:
+                await interaction.followup.send(f"Protocol generated but failed to save: {_e}")
+                return
+
+            # Format response
+            _reasoning = _proto.get("reasoning", "")
+            _groups_text = []
+            for _g in _proto.get("groups", []):
+                _meds = "\n".join(f"  • {m['name']} {m.get('dose','')} {m.get('unit','')}" for m in _g.get("medications", []))
+                _groups_text.append(f"**{_g['name']}**\n{_meds}")
+
+            _msg = (
+                f"**{_proto.get('name', 'Supplement Protocol')}** — for *{topic}*\n\n"
+                + "\n\n".join(_groups_text)
+                + f"\n\n*{_reasoning}*"
+                + f"\n_Expires in 24 hours. Code: `{_code}`_"
+            )
+
+            # Import button — one tap, no copy-paste
+            import discord.ui as _dui
+            _view = _dui.View(timeout=86400)
+
+            class _ImportButton(_dui.Button):
+                def __init__(self):
+                    super().__init__(label="Import to Sup Tracker", style=discord.ButtonStyle.green, custom_id=f"import:{_code}")
+
+                async def callback(self, btn_interaction: discord.Interaction):
+                    _btn_uid = str(btn_interaction.user.id)
+                    await btn_interaction.response.defer(ephemeral=False)
+                    _btn_headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
+
+                    # Look up linked account
+                    try:
+                        _link_rq = _req.Request(f"{_SUPA_URL}/rest/v1/linked_accounts?provider=eq.discord&provider_user_id=eq.{_btn_uid}&select=user_id", headers=_btn_headers)
+                        with _req.urlopen(_link_rq, timeout=10) as _r:
+                            _links = _json.loads(_r.read().decode())
+                    except Exception:
+                        _links = []
+
+                    if not _links:
+                        await btn_interaction.followup.send("Your Discord isn't linked. Run `/link email:your@email.com` first.", ephemeral=True)
+                        return
+
+                    _uid = _links[0]["user_id"]
+                    _p_code = self.custom_id.split(":", 1)[1]
+
+                    # Get pending protocol
+                    try:
+                        _p_rq = _req.Request(f"{_SUPA_URL}/rest/v1/pending_protocols?code=eq.{_p_code}&select=protocol", headers=_btn_headers)
+                        with _req.urlopen(_p_rq, timeout=10) as _r:
+                            _pend = _json.loads(_r.read().decode())
+                    except Exception:
+                        _pend = []
+
+                    if not _pend:
+                        await btn_interaction.followup.send("Protocol expired or already imported.", ephemeral=True)
+                        return
+
+                    _pp = _pend[0]["protocol"]
+                    _gc, _mc = 0, 0
+
+                    for _ig in _pp.get("groups", []):
+                        try:
+                            _gb = _json.dumps({"user_id": _uid, "name": (_ig.get("name") or "Imported")[:100], "schedule_type": _ig.get("schedule_type", "ed"), "schedule_days": _ig.get("schedule_days", []), "time_of_day": _ig.get("time_of_day", ["morning"]), "color": _ig.get("color", "#00d4aa"), "active": True, "sort_order": 0}).encode()
+                            _grq = _req.Request(f"{_SUPA_URL}/rest/v1/groups", data=_gb, headers={**_btn_headers, "Prefer": "return=representation"}, method="POST")
+                            with _req.urlopen(_grq, timeout=10) as _r:
+                                _ng = _json.loads(_r.read().decode())[0]
+                            _gc += 1
+                        except Exception:
+                            continue
+                        for _mi, _im in enumerate(_ig.get("medications", [])):
+                            _mn = str(_im.get("name", ""))[:100]
+                            if not _mn: continue
+                            try:
+                                _nb = _json.dumps({"input_name": _mn}).encode()
+                                _nrq = _req.Request(f"{_SUPA_URL}/rest/v1/rpc/normalize_supplement_name", data=_nb, headers=_btn_headers, method="POST")
+                                with _req.urlopen(_nrq, timeout=10) as _r:
+                                    _nd = _json.loads(_r.read().decode())
+                                if _nd and _nd[0].get("canonical_name"): _mn = _nd[0]["canonical_name"]
+                            except Exception: pass
+                            try:
+                                _mb = _json.dumps({"group_id": _ng["id"], "name": _mn, "dose": str(_im.get("dose", ""))[:50], "unit": str(_im.get("unit", ""))[:20], "sort_order": _mi, "schedule_type": _im.get("schedule_type"), "schedule_days": _im.get("schedule_days"), "time_of_day": _im.get("time_of_day"), "frequency_days": _im.get("frequency_days")}).encode()
+                                _mrq = _req.Request(f"{_SUPA_URL}/rest/v1/medications", data=_mb, headers={**_btn_headers, "Prefer": "return=minimal"}, method="POST")
+                                _req.urlopen(_mrq, timeout=10)
+                                _mc += 1
+                            except Exception: pass
+
+                    # Delete pending + disable button
+                    try:
+                        _drq = _req.Request(f"{_SUPA_URL}/rest/v1/pending_protocols?code=eq.{_p_code}", headers=_btn_headers, method="DELETE")
+                        _req.urlopen(_drq, timeout=10)
+                    except Exception: pass
+                    self.disabled = True
+                    self.label = "Imported"
+                    try: await btn_interaction.message.edit(view=_view)
+                    except Exception: pass
+                    await btn_interaction.followup.send(f"Imported **{_pp.get('name', 'Protocol')}** — {_gc} group{'s' if _gc != 1 else ''}, {_mc} supplement{'s' if _mc != 1 else ''}. Open Sup Tracker to see it.")
+
+            _view.add_item(_ImportButton())
+            await interaction.followup.send(_msg, view=_view)
+
+
+        # ── /link — link Discord to Sup Tracker ──
+        @tree.command(name="link", description="Link your Discord account to Sup Tracker")
+        @discord.app_commands.describe(email="Your Sup Tracker email address")
+        async def slash_link(interaction: discord.Interaction, email: str = ""):
+            import json as _json
+            import urllib.request as _req
+
+            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            if not _SUPA_URL or not _SUPA_KEY:
+                await interaction.response.send_message("Missing configuration.", ephemeral=True)
+                return
+
+            _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
+            uid = str(interaction.user.id)
+
+            # Check if already linked
+            try:
+                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/linked_accounts?provider=eq.discord&provider_user_id=eq.{uid}&select=user_id", headers=_headers)
+                with _req.urlopen(_rq, timeout=10) as _resp:
+                    existing = _json.loads(_resp.read().decode())
+                if existing:
+                    await interaction.response.send_message("Your Discord is already linked to Sup Tracker.", ephemeral=True)
+                    return
+            except Exception:
+                pass
+
+            if not email:
+                await interaction.response.send_message(
+                    "To link your Discord to Sup Tracker:\n"
+                    "1. Sign up at **sups.pumplabs.dev** (Google or email)\n"
+                    "2. Run `/link email:your@email.com`",
+                    ephemeral=True
+                )
+                return
+
+            # Look up profile by email
+            try:
+                _clean = email.lower().strip()
+                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/profiles?email=eq.{_clean}&select=id,email,display_name", headers=_headers)
+                with _req.urlopen(_rq, timeout=10) as _resp:
+                    profiles = _json.loads(_resp.read().decode())
+            except Exception as _e:
+                await interaction.response.send_message(f"Error looking up account: {_e}", ephemeral=True)
+                return
+
+            if not profiles:
+                await interaction.response.send_message(f"No Sup Tracker account found for `{email}`. Sign up first at **sups.pumplabs.dev**.", ephemeral=True)
+                return
+
+            profile = profiles[0]
+
+            # Create the link
+            try:
+                _body = _json.dumps({
+                    "user_id": profile["id"],
+                    "provider": "discord",
+                    "provider_user_id": uid,
+                    "provider_username": interaction.user.name,
+                }).encode()
+                _save_headers = {**_headers, "Prefer": "return=minimal"}
+                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/linked_accounts", data=_body, headers=_save_headers, method="POST")
+                _req.urlopen(_rq, timeout=10)
+            except Exception as _e:
+                await interaction.response.send_message(f"Failed to link: {_e}", ephemeral=True)
+                return
+
+            await interaction.response.send_message(
+                f"Linked! Your Discord is now connected to Sup Tracker ({profile.get('display_name') or profile.get('email')}).",
+                ephemeral=True
+            )
+
+        # ── /import — import a pending protocol to Sup Tracker ──
+        @tree.command(name="import-regimen", description="Import a supplement protocol to your Sup Tracker")
+        @discord.app_commands.describe(code="Protocol code from /suggest")
+        async def slash_import(interaction: discord.Interaction, code: str):
+            import json as _json
+            import urllib.request as _req
+
+            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            if not _SUPA_URL or not _SUPA_KEY:
+                await interaction.response.send_message("Missing configuration.", ephemeral=True)
+                return
+
+            _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
+            uid = str(interaction.user.id)
+
+            await interaction.response.defer(ephemeral=False)
+
+            # Look up linked account
+            try:
+                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/linked_accounts?provider=eq.discord&provider_user_id=eq.{uid}&select=user_id", headers=_headers)
+                with _req.urlopen(_rq, timeout=10) as _resp:
+                    links = _json.loads(_resp.read().decode())
+            except Exception:
+                links = []
+
+            if not links:
+                await interaction.followup.send("Your Discord isn't linked to Sup Tracker. Run `/link email:your@email.com` first.")
+                return
+
+            user_id = links[0]["user_id"]
+
+            # Look up pending protocol
+            try:
+                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/pending_protocols?code=eq.{code}&select=protocol", headers=_headers)
+                with _req.urlopen(_rq, timeout=10) as _resp:
+                    pending = _json.loads(_resp.read().decode())
+            except Exception:
+                pending = []
+
+            if not pending:
+                await interaction.followup.send("Protocol not found or expired. Check the code.")
+                return
+
+            proto = pending[0]["protocol"]
+            groups_created = 0
+            meds_created = 0
+
+            for group in proto.get("groups", []):
+                # Create group
+                try:
+                    _body = _json.dumps({
+                        "user_id": user_id,
+                        "name": (group.get("name") or "Imported")[:100],
+                        "schedule_type": group.get("schedule_type", "ed"),
+                        "schedule_days": group.get("schedule_days", []),
+                        "time_of_day": group.get("time_of_day", ["morning"]),
+                        "color": group.get("color", "#00d4aa"),
+                        "active": True,
+                        "sort_order": 0,
+                    }).encode()
+                    _save_headers = {**_headers, "Prefer": "return=representation"}
+                    _rq = _req.Request(f"{_SUPA_URL}/rest/v1/groups", data=_body, headers=_save_headers, method="POST")
+                    with _req.urlopen(_rq, timeout=10) as _resp:
+                        new_group = _json.loads(_resp.read().decode())[0]
+                except Exception as _e:
+                    continue
+
+                groups_created += 1
+
+                for i, med in enumerate(group.get("medications", [])):
+                    med_name = str(med.get("name", ""))[:100]
+                    if not med_name:
+                        continue
+
+                    # Normalize
+                    try:
+                        _norm_body = _json.dumps({"input_name": med_name}).encode()
+                        _rq = _req.Request(f"{_SUPA_URL}/rest/v1/rpc/normalize_supplement_name", data=_norm_body, headers=_headers, method="POST")
+                        with _req.urlopen(_rq, timeout=10) as _resp:
+                            norm = _json.loads(_resp.read().decode())
+                        if norm and norm[0].get("canonical_name"):
+                            med_name = norm[0]["canonical_name"]
+                    except Exception:
+                        pass
+
+                    try:
+                        _med_body = _json.dumps({
+                            "group_id": new_group["id"],
+                            "name": med_name,
+                            "dose": str(med.get("dose", ""))[:50],
+                            "unit": str(med.get("unit", ""))[:20],
+                            "sort_order": i,
+                            "schedule_type": med.get("schedule_type"),
+                            "schedule_days": med.get("schedule_days"),
+                            "time_of_day": med.get("time_of_day"),
+                            "frequency_days": med.get("frequency_days"),
+                        }).encode()
+                        _save_headers = {**_headers, "Prefer": "return=minimal"}
+                        _rq = _req.Request(f"{_SUPA_URL}/rest/v1/medications", data=_med_body, headers=_save_headers, method="POST")
+                        _req.urlopen(_rq, timeout=10)
+                        meds_created += 1
+                    except Exception:
+                        pass
+
+            # Delete pending protocol
+            try:
+                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/pending_protocols?code=eq.{code}", headers=_headers, method="DELETE")
+                _req.urlopen(_rq, timeout=10)
+            except Exception:
+                pass
+
+            await interaction.followup.send(
+                f"Imported **{proto.get('name', 'Protocol')}** — {groups_created} group{'s' if groups_created != 1 else ''}, "
+                f"{meds_created} supplement{'s' if meds_created != 1 else ''}. Open Sup Tracker to start tracking."
+            )
+
+
+        # ── Supplement Stack Builder (DM only) ──────────────────────
+        _sups_sessions = {}
+
+        @tree.command(name="start-sups", description="Start building a supplement stack (DM only)")
+        async def slash_start_sups(interaction: discord.Interaction):
+            if not isinstance(interaction.channel, discord.DMChannel):
+                await interaction.response.send_message("This command only works in DMs. Message me directly to build a stack.", ephemeral=True)
+                return
+            uid = str(interaction.user.id)
+            _sups_sessions[uid] = {"items": [], "started": True}
+            await interaction.response.send_message(
+                "**Stack builder started.** Add supplements with:\n"
+                "`/sup name:<name> dose:<amount> unit:<mg/IU/mcg> schedule:<ed/eod/MWF/etc>`\n\n"
+                "When done, run `/end-sups name:<stack name>` to finalize."
+            )
+
+        @tree.command(name="sup", description="Add a supplement to your stack (DM only)")
+        @discord.app_commands.describe(
+            name="Supplement name (type to search)", dose="Dose amount (e.g. 200)",
+            unit="Unit (mg, IU, mcg, ml, g)", schedule="Schedule (ed, eod, MWF, mon/thu, weekly)",
+            time_of_day="Time of day (morning, afternoon, evening, bedtime)",
+        )
+        async def slash_sup(interaction: discord.Interaction, name: str, dose: str = "", unit: str = "mg", schedule: str = "ed", time_of_day: str = "morning"):
+            import json as _json
+            import urllib.request as _req
+            if not isinstance(interaction.channel, discord.DMChannel):
+                await interaction.response.send_message("This command only works in DMs. Message me directly to build a stack.", ephemeral=True)
+                return
+            uid = str(interaction.user.id)
+            session = _sups_sessions.get(uid)
+            if not session or not session.get("started"):
+                await interaction.response.send_message("No active stack session. Run `/start-sups` first.", ephemeral=True)
+                return
+            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
+            canonical = name
+            if _SUPA_URL and _SUPA_KEY:
+                try:
+                    _body = _json.dumps({"input_name": name}).encode()
+                    _rq = _req.Request(f"{_SUPA_URL}/rest/v1/rpc/normalize_supplement_name", data=_body, headers=_headers, method="POST")
+                    with _req.urlopen(_rq, timeout=10) as _resp:
+                        _norm = _json.loads(_resp.read().decode())
+                    if _norm and _norm[0].get("canonical_name"):
+                        canonical = _norm[0]["canonical_name"]
+                except Exception:
+                    pass
+            _s = schedule.lower().strip()
+            _presets = {"ed": ("ed", ["sun","mon","tue","wed","thu","fri","sat"]), "daily": ("ed", ["sun","mon","tue","wed","thu","fri","sat"]),
+                "eod": ("eod", []), "mwf": ("custom", ["mon","wed","fri"]), "mon/thu": ("custom", ["mon","thu"]),
+                "mon/wed/fri": ("custom", ["mon","wed","fri"]), "tue/thu": ("custom", ["tue","thu"]),
+                "tue/thu/sat": ("custom", ["tue","thu","sat"]), "weekly": ("weekly", [])}
+            _stype, _sdays = _presets.get(_s, ("ed", ["sun","mon","tue","wed","thu","fri","sat"]))
+            if "/" in _s and _s not in _presets:
+                _abbr = {"mon":"mon","monday":"mon","tue":"tue","tuesday":"tue","wed":"wed","wednesday":"wed","thu":"thu","thursday":"thu","fri":"fri","friday":"fri","sat":"sat","saturday":"sat","sun":"sun","sunday":"sun"}
+                _stype, _sdays = "custom", [_abbr.get(d.strip(), d.strip()) for d in _s.split("/")]
+            _valid_times = ["morning", "afternoon", "evening", "bedtime"]
+            _time = time_of_day.lower().strip() if time_of_day.lower().strip() in _valid_times else "morning"
+            item = {"name": canonical, "dose": dose, "unit": unit, "schedule_type": _stype, "schedule_days": _sdays, "time_of_day": [_time], "frequency_days": 2 if _stype == "eod" else None}
+            session["items"].append(item)
+            count = len(session["items"])
+            matched = f" (matched: **{canonical}**)" if canonical != name else ""
+            if _stype == "custom" and _sdays: sched_label = "/".join(d.capitalize() for d in _sdays)
+            elif _stype == "eod": sched_label = "Every other day"
+            elif _stype == "weekly": sched_label = "Weekly"
+            else: sched_label = "Daily"
+            await interaction.response.send_message(f"Added #{count}: **{canonical}** {dose} {unit} \u2014 {sched_label} ({_time}){matched}\nAdd more with `/sup` or finalize with `/end-sups name:<stack name>`")
+
+        @slash_sup.autocomplete("name")
+        async def _sup_name_ac(interaction: discord.Interaction, current: str):
+            import json as _json, urllib.request as _req
+            if not current or len(current) < 2: return []
+            _SU, _SK = os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_SERVICE_KEY", "")
+            if not _SU or not _SK: return []
+            _h = {"apikey": _SK, "Authorization": f"Bearer {_SK}", "Content-Type": "application/json"}
+            try:
+                _search = current.lower().replace(" ", "%")
+                _rq = _req.Request(f"{_SU}/rest/v1/supplement_database?or=(canonical_name.ilike.%25{_search}%25,aliases.cs.{{{current.lower()}}})&select=canonical_name&limit=10", headers=_h)
+                with _req.urlopen(_rq, timeout=5) as _resp:
+                    results = _json.loads(_resp.read().decode())
+                return [discord.app_commands.Choice(name=r["canonical_name"][:100], value=r["canonical_name"][:100]) for r in results]
+            except Exception: return []
+
+        @slash_sup.autocomplete("unit")
+        async def _sup_unit_ac(interaction: discord.Interaction, current: str):
+            return [discord.app_commands.Choice(name=u, value=u) for u in ["mg","mcg","IU","ml","g","drops","capsules","tablets"] if current.lower() in u.lower()][:10]
+
+        @slash_sup.autocomplete("schedule")
+        async def _sup_sched_ac(interaction: discord.Interaction, current: str):
+            return [discord.app_commands.Choice(name=l, value=v) for l,v in [("Daily","ed"),("Every other day","eod"),("Mon/Wed/Fri","MWF"),("Mon/Thu","mon/thu"),("Tue/Thu","tue/thu"),("Tue/Thu/Sat","tue/thu/sat"),("Weekly","weekly")] if current.lower() in l.lower() or current.lower() in v.lower()][:10]
+
+        @slash_sup.autocomplete("time_of_day")
+        async def _sup_time_ac(interaction: discord.Interaction, current: str):
+            return [discord.app_commands.Choice(name=t.capitalize(), value=t) for t in ["morning","afternoon","evening","bedtime"] if current.lower() in t.lower()][:10]
+
+        @tree.command(name="end-sups", description="Finalize your supplement stack (DM only)")
+        @discord.app_commands.describe(name="Name for this stack (e.g. TRT Protocol, Morning Stack)")
+        async def slash_end_sups(interaction: discord.Interaction, name: str = "My Stack"):
+            import json as _json, hashlib as _hl, urllib.request as _req
+            if not isinstance(interaction.channel, discord.DMChannel):
+                await interaction.response.send_message("This command only works in DMs. Message me directly to build a stack.", ephemeral=True)
+                return
+            uid = str(interaction.user.id)
+            session = _sups_sessions.get(uid)
+            if not session or not session.get("started") or not session.get("items"):
+                await interaction.response.send_message("No active stack or no supplements added. Run `/start-sups` then `/sup` first.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            items = session["items"]
+            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
+            medications = []
+            for item in items:
+                med = {"name": item["name"], "dose": item["dose"], "unit": item["unit"]}
+                for k in ("schedule_type", "schedule_days", "time_of_day", "frequency_days"):
+                    if item.get(k): med[k] = item[k]
+                medications.append(med)
+            protocol = {"version": 1, "name": name, "source": "sups-builder",
+                "groups": [{"name": name, "schedule_type": "ed", "schedule_days": ["sun","mon","tue","wed","thu","fri","sat"],
+                    "time_of_day": ["morning"], "color": "#00d4aa", "medications": medications}]}
+            _slug = name.lower().replace(" ", "-")[:20]
+            _hash = _hl.md5(f"{uid}{_slug}{len(items)}".encode()).hexdigest()[:6]
+            code = f"pl-{_slug}-{_hash}"
+            try:
+                _body = _json.dumps({"code": code, "protocol": protocol}).encode()
+                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/pending_protocols", data=_body, headers={**_headers, "Prefer": "return=minimal"}, method="POST")
+                _req.urlopen(_rq, timeout=10)
+            except Exception as _e:
+                await interaction.followup.send(f"Failed to save protocol: {_e}")
+                return
+            summary_lines = [f"**{name}** \u2014 {len(items)} supplement{'s' if len(items) != 1 else ''}\n"]
+            for i, item in enumerate(items, 1):
+                st, sd, td = item.get("schedule_type","ed"), item.get("schedule_days",[]), item.get("time_of_day",["morning"])
+                if st == "custom" and sd: ss = "/".join(d.capitalize() for d in sd)
+                elif st == "eod": ss = "Every other day"
+                elif st == "weekly": ss = "Weekly"
+                else: ss = "Daily"
+                summary_lines.append(f"{i}. **{item['name']}** {item['dose']} {item['unit']} \u2014 {ss} ({', '.join(td)})")
+            del _sups_sessions[uid]
+            await interaction.followup.send("\n".join(summary_lines) + f"\n\nTo import to Sup Tracker, run:\n`/import-regimen code:{code}`\n\nCode expires in 24 hours.")
+
+
 
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
