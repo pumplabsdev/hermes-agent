@@ -2406,14 +2406,15 @@ Rules:
 
         @slash_sup.autocomplete("name")
         async def _sup_name_ac(interaction: discord.Interaction, current: str):
-            import json as _json, urllib.request as _req
+            import json as _json, urllib.request as _req, urllib.parse as _parse
             if not current or len(current) < 2: return []
             _SU, _SK = os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_SERVICE_KEY", "")
             if not _SU or not _SK: return []
-            _h = {"apikey": _SK, "Authorization": f"Bearer {_SK}", "Content-Type": "application/json"}
+            _h = {"apikey": _SK, "Authorization": f"Bearer {_SK}"}
             try:
-                _search = current.lower().replace(" ", "%")
-                _rq = _req.Request(f"{_SU}/rest/v1/supplement_database?name=ilike.*{_search}*&select=name&limit=10", headers=_h)
+                _term = current.lower()
+                _params = _parse.urlencode({"name": f"ilike.*{_term}*", "select": "name", "limit": "10"})
+                _rq = _req.Request(f"{_SU}/rest/v1/supplement_database?{_params}", headers=_h)
                 with _req.urlopen(_rq, timeout=5) as _resp:
                     results = _json.loads(_resp.read().decode())
                 return [discord.app_commands.Choice(name=r["name"][:100], value=r["name"][:100]) for r in results]
