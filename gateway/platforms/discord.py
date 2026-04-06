@@ -2482,9 +2482,18 @@ Rules:
                 return
             await interaction.response.defer()
             items = session["items"]
-            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_URL = os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co"
             _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            if not _SUPA_KEY:
+                # Try loading from profile .env
+                _env_path = os.path.join(os.environ.get("HERMES_HOME", "/profile"), ".env")
+                if os.path.exists(_env_path):
+                    with open(_env_path) as _ef:
+                        for _el in _ef:
+                            if _el.startswith("SUPABASE_SERVICE_KEY="):
+                                _SUPA_KEY = _el.strip().split("=", 1)[1].strip()
             _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
+            logger.info("[sups-builder] end-sups: URL=%s KEY=%s...", _SUPA_URL, _SUPA_KEY[:20] if _SUPA_KEY else "NONE")
             medications = []
             for item in items:
                 med = {"name": item["name"], "dose": item["dose"], "unit": item["unit"]}
