@@ -2413,10 +2413,10 @@ Rules:
             _h = {"apikey": _SK, "Authorization": f"Bearer {_SK}", "Content-Type": "application/json"}
             try:
                 _search = current.lower().replace(" ", "%")
-                _rq = _req.Request(f"{_SU}/rest/v1/supplement_database?or=(canonical_name.ilike.%25{_search}%25,aliases.cs.{{{current.lower()}}})&select=canonical_name&limit=10", headers=_h)
+                _rq = _req.Request(f"{_SU}/rest/v1/supplement_database?name=ilike.*{_search}*&select=name&limit=10", headers=_h)
                 with _req.urlopen(_rq, timeout=5) as _resp:
                     results = _json.loads(_resp.read().decode())
-                return [discord.app_commands.Choice(name=r["canonical_name"][:100], value=r["canonical_name"][:100]) for r in results]
+                return [discord.app_commands.Choice(name=r["name"][:100], value=r["name"][:100]) for r in results]
             except Exception: return []
 
         @slash_sup.autocomplete("unit")
