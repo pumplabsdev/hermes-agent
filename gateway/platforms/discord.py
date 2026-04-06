@@ -2383,7 +2383,7 @@ Rules:
                         canonical = _norm[0]["canonical_name"]
                 except Exception:
                     pass
-            _s = schedule.lower().strip()
+            _s = schedule.lower().strip().replace(" / ", "/").replace(" /", "/").replace("/ ", "/")
             _presets = {"ed": ("ed", ["sun","mon","tue","wed","thu","fri","sat"]), "daily": ("ed", ["sun","mon","tue","wed","thu","fri","sat"]),
                 "eod": ("eod", []), "mwf": ("custom", ["mon","wed","fri"]), "mon/thu": ("custom", ["mon","thu"]),
                 "mon/wed/fri": ("custom", ["mon","wed","fri"]), "tue/thu": ("custom", ["tue","thu"]),
@@ -2392,9 +2392,12 @@ Rules:
             if "/" in _s and _s not in _presets:
                 _abbr = {"mon":"mon","monday":"mon","tue":"tue","tuesday":"tue","wed":"wed","wednesday":"wed","thu":"thu","thursday":"thu","fri":"fri","friday":"fri","sat":"sat","saturday":"sat","sun":"sun","sunday":"sun"}
                 _stype, _sdays = "custom", [_abbr.get(d.strip(), d.strip()) for d in _s.split("/")]
-            _valid_times = ["morning", "afternoon", "evening", "bedtime"]
-            _time = time_of_day.lower().strip() if time_of_day.lower().strip() in _valid_times else "morning"
-            item = {"name": canonical, "dose": dose, "unit": unit, "schedule_type": _stype, "schedule_days": _sdays, "time_of_day": [_time], "frequency_days": 2 if _stype == "eod" else None}
+            _valid_times = ["morning", "afternoon", "evening", "bedtime", "pre-workout", "post-workout", "with meals", "night"]
+            _time_input = time_of_day.lower().strip().replace("night", "bedtime")
+            _times = [t.strip() for t in _time_input.replace(",", " ").split() if t.strip() in _valid_times]
+            if not _times:
+                _times = ["morning"]
+            item = {"name": canonical, "dose": dose, "unit": unit, "schedule_type": _stype, "schedule_days": _sdays, "time_of_day": _times, "frequency_days": 2 if _stype == "eod" else None}
             session["items"].append(item)
             count = len(session["items"])
             matched = f" (matched: **{canonical}**)" if canonical != name else ""
