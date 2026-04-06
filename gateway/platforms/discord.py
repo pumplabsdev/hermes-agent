@@ -1937,7 +1937,7 @@ class DiscordAdapter(BasePlatformAdapter):
             await interaction.response.defer(ephemeral=False)
 
             _VAULT = _Path("/knowledge-base")
-            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_URL = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co")
             _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
             _API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -2153,7 +2153,7 @@ Rules:
             import json as _json
             import urllib.request as _req
 
-            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_URL = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co")
             _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
             if not _SUPA_URL or not _SUPA_KEY:
                 await interaction.response.send_message("Missing configuration.", ephemeral=True)
@@ -2225,7 +2225,7 @@ Rules:
             import json as _json
             import urllib.request as _req
 
-            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_URL = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co")
             _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
             if not _SUPA_URL or not _SUPA_KEY:
                 await interaction.response.send_message("Missing configuration.", ephemeral=True)
@@ -2369,7 +2369,7 @@ Rules:
             if not session or not session.get("started"):
                 await interaction.response.send_message("No active stack session. Run `/start-sups` first.", ephemeral=True)
                 return
-            _SUPA_URL = os.environ.get("SUPABASE_URL", "")
+            _SUPA_URL = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co")
             _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
             _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
             canonical = name
@@ -2422,7 +2422,7 @@ Rules:
         async def _load_sup_cache():
             import json as _json, urllib.request as _req, urllib.parse as _parse
             try:
-                _SU = os.environ.get("SUPABASE_URL", "")
+                _SU = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co")
                 _SK = os.environ.get("SUPABASE_SERVICE_KEY", "")
                 if not _SU or not _SK:
                     return
@@ -2490,7 +2490,7 @@ Rules:
                 return
             await interaction.response.defer()
             items = session["items"]
-            _SUPA_URL = os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co"
+            _SUPA_URL = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co") or "https://itdtludfrlwjmjxtpvwl.supabase.co"
             _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
             if not _SUPA_KEY:
                 # Try loading from profile .env
