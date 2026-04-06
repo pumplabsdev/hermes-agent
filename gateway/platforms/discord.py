@@ -2433,7 +2433,7 @@ Rules:
         # Load cache on startup
         asyncio.get_event_loop().call_soon(lambda: asyncio.ensure_future(_load_sup_cache()))
 
-        @slash_sup.autocomplete(name)
+        @slash_sup.autocomplete("name")
         async def _sup_name_ac(interaction: discord.Interaction, current: str):
             if not current or len(current) < 2:
                 return []
