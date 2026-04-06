@@ -2480,49 +2480,19 @@ Rules:
         @discord.app_commands.describe(name="Name for this stack (e.g. TRT Protocol, Morning Stack)")
         async def slash_end_sups(interaction: discord.Interaction, name: str = "My Stack"):
             import json as _json, hashlib as _hl, urllib.request as _req
-            # Defer IMMEDIATELY to avoid 3-second timeout
             is_dm = isinstance(interaction.channel, discord.DMChannel)
             if not is_dm:
                 await interaction.response.send_message("This command only works in DMs. Message me directly to build a stack.", ephemeral=True)
                 return
-            await interaction.response.defer()
             uid = str(interaction.user.id)
             session = _sups_sessions.get(uid)
             if not session or not session.get("started") or not session.get("items"):
-                await interaction.followup.send("No active stack or no supplements added. Run `/start-sups` then `/sup` first.")
+                await interaction.response.send_message("No active stack or no supplements added. Run `/start-sups` then `/sup` first.", ephemeral=True)
                 return
+
             items = session["items"]
-            _SUPA_URL = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co") or "https://itdtludfrlwjmjxtpvwl.supabase.co"
-            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-            if not _SUPA_KEY:
-                # Try loading from profile .env
-                _env_path = os.path.join(os.environ.get("HERMES_HOME", "/profile"), ".env")
-                if os.path.exists(_env_path):
-                    with open(_env_path) as _ef:
-                        for _el in _ef:
-                            if _el.startswith("SUPABASE_SERVICE_KEY="):
-                                _SUPA_KEY = _el.strip().split("=", 1)[1].strip()
-            _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
-            logger.info("[sups-builder] end-sups: URL=%s KEY=%s...", _SUPA_URL, _SUPA_KEY[:20] if _SUPA_KEY else "NONE")
-            medications = []
-            for item in items:
-                med = {"name": item["name"], "dose": item["dose"], "unit": item["unit"]}
-                for k in ("schedule_type", "schedule_days", "time_of_day", "frequency_days"):
-                    if item.get(k): med[k] = item[k]
-                medications.append(med)
-            protocol = {"version": 1, "name": name, "source": "sups-builder",
-                "groups": [{"name": name, "schedule_type": "ed", "schedule_days": ["sun","mon","tue","wed","thu","fri","sat"],
-                    "time_of_day": ["morning"], "color": "#00d4aa", "medications": medications}]}
-            _slug = name.lower().replace(" ", "-")[:20]
-            _hash = _hl.md5(f"{uid}{_slug}{len(items)}".encode()).hexdigest()[:6]
-            code = f"pl-{_slug}-{_hash}"
-            try:
-                _body = _json.dumps({"code": code, "protocol": protocol}).encode()
-                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/pending_protocols", data=_body, headers={**_headers, "Prefer": "return=minimal"}, method="POST")
-                _req.urlopen(_rq, timeout=10)
-            except Exception as _e:
-                await interaction.followup.send(f"Failed to save protocol: {_e}")
-                return
+
+            # Build summary immediately (no network calls yet)
             summary_lines = [f"**{name}** \u2014 {len(items)} supplement{'s' if len(items) != 1 else ''}\n"]
             for i, item in enumerate(items, 1):
                 st, sd, td = item.get("schedule_type","ed"), item.get("schedule_days",[]), item.get("time_of_day",["morning"])
@@ -2531,10 +2501,55 @@ Rules:
                 elif st == "weekly": ss = "Weekly"
                 else: ss = "Daily"
                 summary_lines.append(f"{i}. **{item['name']}** {item['dose']} {item['unit']} \u2014 {ss} ({', '.join(td)})")
+
+            # Build protocol
+            medications = []
+            for item in items:
+                med = {"name": item["name"], "dose": item["dose"], "unit": item["unit"]}
+                for k in ("schedule_type", "schedule_days", "time_of_day", "frequency_days"):
+                    if item.get(k): med[k] = item[k]
+                medications.append(med)
+
+            protocol = {"version": 1, "name": name, "source": "sups-builder",
+                "groups": [{"name": name, "schedule_type": "ed", "schedule_days": ["sun","mon","tue","wed","thu","fri","sat"],
+                    "time_of_day": ["morning"], "color": "#00d4aa", "medications": medications}]}
+
+            _slug = name.lower().replace(" ", "-")[:20]
+            _hash = _hl.md5(f"{uid}{_slug}{len(items)}".encode()).hexdigest()[:6]
+            code = f"pl-{_slug}-{_hash}"
+
+            # Respond IMMEDIATELY with the summary (no defer needed)
+            summary = "\n".join(summary_lines)
+            await interaction.response.send_message(
+                f"{summary}\n\nSaving protocol... use `/import-regimen code:{code}` after this message updates."
+            )
+
+            # Now save to Supabase (after responding)
+            _SUPA_URL = "https://itdtludfrlwjmjxtpvwl.supabase.co"
+            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            if not _SUPA_KEY:
+                _env_path = os.path.join(os.environ.get("HERMES_HOME", "/profile"), ".env")
+                if os.path.exists(_env_path):
+                    with open(_env_path) as _ef:
+                        for _el in _ef:
+                            if _el.startswith("SUPABASE_SERVICE_KEY="):
+                                _SUPA_KEY = _el.strip().split("=", 1)[1].strip()
+
+            try:
+                _body = _json.dumps({"code": code, "protocol": protocol}).encode()
+                _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
+                _rq = _req.Request(f"{_SUPA_URL}/rest/v1/pending_protocols", data=_body, headers=_headers, method="POST")
+                _req.urlopen(_rq, timeout=10)
+                # Update the message with success
+                await interaction.edit_original_response(
+                    content=f"{summary}\n\nTo import to Sup Tracker, run:\n`/import-regimen code:{code}`\n\nCode expires in 24 hours."
+                )
+            except Exception as _e:
+                await interaction.edit_original_response(
+                    content=f"{summary}\n\nFailed to save: {_e}"
+                )
+
             del _sups_sessions[uid]
-            await interaction.followup.send("\n".join(summary_lines) + f"\n\nTo import to Sup Tracker, run:\n`/import-regimen code:{code}`\n\nCode expires in 24 hours.")
-
-
 
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
