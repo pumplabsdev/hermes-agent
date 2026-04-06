@@ -2408,6 +2408,54 @@ Rules:
 
 
 
+        @slash_sup.autocomplete("name")
+        async def _sup_name_ac(interaction: discord.Interaction, current: str):
+            import json as _json, urllib.request as _req, urllib.parse as _parse
+            if not current or len(current) < 2:
+                return []
+            try:
+                _SU = os.environ.get("SUPABASE_URL", "")
+                _SK = os.environ.get("SUPABASE_SERVICE_KEY", "")
+                if not _SU or not _SK:
+                    return []
+                _h = {"apikey": _SK, "Authorization": f"Bearer {_SK}"}
+                _term = current.lower()
+                _params = _parse.urlencode({"name": f"ilike.*{_term}*", "select": "name", "limit": "15"})
+                _rq = _req.Request(f"{_SU}/rest/v1/supplement_database?{_params}", headers=_h)
+                with _req.urlopen(_rq, timeout=3) as _resp:
+                    results = _json.loads(_resp.read().decode())
+                return [discord.app_commands.Choice(name=r["name"][:100], value=r["name"][:100]) for r in results]
+            except Exception as _e:
+                logger.debug("[sups-builder] autocomplete error: %s", _e)
+                return []
+
+        @slash_sup.autocomplete("unit")
+        async def _sup_unit_ac(interaction: discord.Interaction, current: str):
+            units = ["mg", "mcg", "IU", "ml", "g", "drops", "capsules", "tablets"]
+            if not current:
+                return [discord.app_commands.Choice(name=u, value=u) for u in units]
+            return [discord.app_commands.Choice(name=u, value=u) for u in units if current.lower() in u.lower()]
+
+        @slash_sup.autocomplete("schedule")
+        async def _sup_sched_ac(interaction: discord.Interaction, current: str):
+            scheds = [
+                ("Daily", "ed"), ("Every other day", "eod"), ("Mon/Wed/Fri", "MWF"),
+                ("Mon/Thu", "mon/thu"), ("Tue/Thu", "tue/thu"), ("Tue/Thu/Sat", "tue/thu/sat"),
+                ("Weekly", "weekly"), ("Sunday", "sun"), ("Monday", "mon"), ("Tuesday", "tue"),
+                ("Wednesday", "wed"), ("Thursday", "thu"), ("Friday", "fri"), ("Saturday", "sat"),
+            ]
+            if not current:
+                return [discord.app_commands.Choice(name=l, value=v) for l, v in scheds[:10]]
+            return [discord.app_commands.Choice(name=l, value=v) for l, v in scheds if current.lower() in l.lower() or current.lower() in v.lower()][:10]
+
+        @slash_sup.autocomplete("time_of_day")
+        async def _sup_time_ac(interaction: discord.Interaction, current: str):
+            times = [("Morning", "morning"), ("Afternoon", "afternoon"), ("Evening", "evening"), ("Bedtime", "bedtime"),
+                     ("With meals", "with meals"), ("Before bed", "bedtime"), ("Pre-workout", "pre-workout"), ("Post-workout", "post-workout")]
+            if not current:
+                return [discord.app_commands.Choice(name=l, value=v) for l, v in times]
+            return [discord.app_commands.Choice(name=l, value=v) for l, v in times if current.lower() in l.lower()][:10]
+
         @tree.command(name="end-sups", description="Finalize your supplement stack (DM only)")
         @discord.app_commands.describe(name="Name for this stack (e.g. TRT Protocol, Morning Stack)")
         async def slash_end_sups(interaction: discord.Interaction, name: str = "My Stack"):
