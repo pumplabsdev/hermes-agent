@@ -560,6 +560,12 @@ class DiscordAdapter(BasePlatformAdapter):
                     logger.warning("[%s] Slash command sync failed: %s", adapter_self.name, e, exc_info=True)
                 adapter_self._ready_event.set()
 
+                # Load supplement name cache for autocomplete
+                try:
+                    await _load_sup_cache()
+                except Exception as e:
+                    logger.error("[sups-builder] Failed to load supplement cache on ready: %s", e)
+
                 # Send startup message to status channel
                 _status_ch_id = os.getenv("DISCORD_STATUS_CHANNEL")
                 if _status_ch_id:
@@ -2471,8 +2477,7 @@ Rules:
             except Exception as _e:
                 logger.error("[sups-builder] Failed to cache supplements: %s", _e)
 
-        # Load cache on startup
-        asyncio.get_event_loop().call_soon(lambda: asyncio.ensure_future(_load_sup_cache()))
+        # Cache is loaded via on_ready hook (see _load_sup_cache call in on_ready)
 
         @slash_sup.autocomplete("name")
         async def _sup_name_ac(interaction: discord.Interaction, current: str):
