@@ -2351,7 +2351,7 @@ Rules:
         def _sups_log(msg, *args):
             """Debug logger for sups-builder — only logs when SUPS_DEBUG=1."""
             if _SUPS_DEBUG:
-                logger.info("[sups-builder] " + msg, *args)
+                logger.warning("[sups-builder] " + msg, *args)
 
         def _get_supa_creds():
             """Return (url, key) — tries env var, then .env file fallback."""
@@ -2481,7 +2481,7 @@ Rules:
                         for alias in r["aliases"]:
                             if alias and alias not in _sup_name_cache:
                                 _sup_name_cache.append(alias)
-                logger.info("[sups-builder] Cached %d supplement names (incl aliases)", len(_sup_name_cache))
+                logger.warning("[sups-builder] Cached %d supplement names (incl aliases)", len(_sup_name_cache))
             except Exception as _e:
                 logger.error("[sups-builder] Failed to cache supplements: %s", _e)
 
