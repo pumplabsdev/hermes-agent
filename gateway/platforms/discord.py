@@ -561,10 +561,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 adapter_self._ready_event.set()
 
                 # Load supplement name cache for autocomplete
-                try:
-                    await _load_sup_cache()
-                except Exception as e:
-                    logger.error("[sups-builder] Failed to load supplement cache on ready: %s", e)
+                if hasattr(adapter_self, '_load_sup_cache'):
+                    try:
+                        await adapter_self._load_sup_cache()
+                    except Exception as e:
+                        logger.error("[sups-builder] Failed to load supplement cache on ready: %s", e)
 
                 # Send startup message to status channel
                 _status_ch_id = os.getenv("DISCORD_STATUS_CHANNEL")
@@ -2345,11 +2346,18 @@ Rules:
         # ── Supplement Stack Builder (DM only) ──────────────────────
         _SUPA_FALLBACK_URL = "https://itdtludfrlwjmjxtpvwl.supabase.co"
         _supa_key_cache = [None]  # mutable container for closure
+        _SUPS_DEBUG = os.environ.get("SUPS_DEBUG", "").lower() in ("1", "true", "yes")
+
+        def _sups_log(msg, *args):
+            """Debug logger for sups-builder — only logs when SUPS_DEBUG=1."""
+            if _SUPS_DEBUG:
+                logger.info("[sups-builder] " + msg, *args)
 
         def _get_supa_creds():
             """Return (url, key) — tries env var, then .env file fallback."""
             url = os.environ.get("SUPABASE_URL", "") or _SUPA_FALLBACK_URL
             key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            _sups_log("creds check: url=%s, key_from_env=%s, cached=%s", bool(url), bool(key), bool(_supa_key_cache[0]))
             if not key and _supa_key_cache[0]:
                 key = _supa_key_cache[0]
             if not key:
@@ -2477,14 +2485,17 @@ Rules:
             except Exception as _e:
                 logger.error("[sups-builder] Failed to cache supplements: %s", _e)
 
-        # Cache is loaded via on_ready hook (see _load_sup_cache call in on_ready)
+        # Attach to client so on_ready can call it (different scope)
+        self._load_sup_cache = _load_sup_cache
 
         @slash_sup.autocomplete("name")
         async def _sup_name_ac(interaction: discord.Interaction, current: str):
+            _sups_log("autocomplete called: current=%r, cache_size=%d", current, len(_sup_name_cache))
             if not current or len(current) < 2:
                 return []
             _term = current.lower()
             matches = [n for n in _sup_name_cache if _term in n.lower()]
+            _sups_log("autocomplete matches: %d for %r", len(matches), current)
             return [discord.app_commands.Choice(name=m[:100], value=m[:100]) for m in matches[:15]]
 
         @slash_sup.autocomplete("unit")
