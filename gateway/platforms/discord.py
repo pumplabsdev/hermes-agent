@@ -2337,6 +2337,36 @@ Rules:
 
 
         # ── Supplement Stack Builder (DM only) ──────────────────────
+        _SUPA_FALLBACK_URL = "https://itdtludfrlwjmjxtpvwl.supabase.co"
+        _supa_key_cache = [None]  # mutable container for closure
+
+        def _get_supa_creds():
+            """Return (url, key) — tries env var, then .env file fallback."""
+            url = os.environ.get("SUPABASE_URL", "") or _SUPA_FALLBACK_URL
+            key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            if not key and _supa_key_cache[0]:
+                key = _supa_key_cache[0]
+            if not key:
+                for _env_path in [
+                    os.path.join(os.environ.get("HERMES_HOME", ""), ".env"),
+                    "/opt/data/.env",
+                    os.path.expanduser("~/.hermes/.env"),
+                ]:
+                    if _env_path and os.path.exists(_env_path):
+                        try:
+                            with open(_env_path) as _ef:
+                                for _el in _ef:
+                                    if _el.startswith("SUPABASE_SERVICE_KEY="):
+                                        key = _el.strip().split("=", 1)[1].strip()
+                                        break
+                        except Exception:
+                            pass
+                    if key:
+                        break
+                if key:
+                    _supa_key_cache[0] = key
+            return url, key
+
         _sups_sessions = {}
 
         @tree.command(name="start-sups", description="Start building a supplement stack (DM only)")
@@ -2369,8 +2399,7 @@ Rules:
             if not session or not session.get("started"):
                 await interaction.response.send_message("No active stack session. Run `/start-sups` first.", ephemeral=True)
                 return
-            _SUPA_URL = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co")
-            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            _SUPA_URL, _SUPA_KEY = _get_supa_creds()
             _headers = {"apikey": _SUPA_KEY, "Authorization": f"Bearer {_SUPA_KEY}", "Content-Type": "application/json"}
             canonical = name
             if _SUPA_URL and _SUPA_KEY:
@@ -2422,9 +2451,9 @@ Rules:
         async def _load_sup_cache():
             import json as _json, urllib.request as _req, urllib.parse as _parse
             try:
-                _SU = (os.environ.get("SUPABASE_URL", "") or "https://itdtludfrlwjmjxtpvwl.supabase.co")
-                _SK = os.environ.get("SUPABASE_SERVICE_KEY", "")
+                _SU, _SK = _get_supa_creds()
                 if not _SU or not _SK:
+                    logger.warning("[sups-builder] No Supabase credentials — supplement cache empty")
                     return
                 _h = {"apikey": _SK, "Authorization": f"Bearer {_SK}"}
                 _params = _parse.urlencode({"select": "name,aliases", "limit": "500"})
@@ -2434,7 +2463,11 @@ Rules:
                 _sup_name_cache.clear()
                 for r in results:
                     _sup_name_cache.append(r["name"])
-                logger.info("[sups-builder] Cached %d supplement names", len(_sup_name_cache))
+                    if r.get("aliases"):
+                        for alias in r["aliases"]:
+                            if alias and alias not in _sup_name_cache:
+                                _sup_name_cache.append(alias)
+                logger.info("[sups-builder] Cached %d supplement names (incl aliases)", len(_sup_name_cache))
             except Exception as _e:
                 logger.error("[sups-builder] Failed to cache supplements: %s", _e)
 
@@ -2525,15 +2558,13 @@ Rules:
             )
 
             # Now save to Supabase (after responding)
-            _SUPA_URL = "https://itdtludfrlwjmjxtpvwl.supabase.co"
-            _SUPA_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+            _SUPA_URL, _SUPA_KEY = _get_supa_creds()
             if not _SUPA_KEY:
-                _env_path = os.path.join(os.environ.get("HERMES_HOME", "/profile"), ".env")
-                if os.path.exists(_env_path):
-                    with open(_env_path) as _ef:
-                        for _el in _ef:
-                            if _el.startswith("SUPABASE_SERVICE_KEY="):
-                                _SUPA_KEY = _el.strip().split("=", 1)[1].strip()
+                await interaction.edit_original_response(
+                    content=f"{summary}\n\n⚠️ Failed to save: Supabase service key not configured."
+                )
+                del _sups_sessions[uid]
+                return
 
             try:
                 _body = _json.dumps({"code": code, "protocol": protocol}).encode()
